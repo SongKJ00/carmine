@@ -11,6 +11,10 @@ jobs:
       with:
         java-version: 14
 
+    - uses: supercharge/redis-github-action@1.4.0
+      with:
+        redis-version: 7
+
     - name: Cache deps
       uses: actions/cache@v1
       id: cache-deps
