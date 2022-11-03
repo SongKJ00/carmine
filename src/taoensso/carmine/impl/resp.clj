@@ -28,10 +28,6 @@
 
 ;; - Interaction between laziness and new lazy arg->ba implementation?
 
-;; - [Perf] `resp.write`: send SIMPLE numbers `:133` vs `$3\r\n133\r\n`, etc.
-;;   - Caches could also be easily updated
-;;   - That should also be compatible with RESP2, yes?
-;;
 ;; - [Perf] Do further benching (grep for `.read`) with:
 ;; - `jedis.RedisInputStream`: readLineBytes, readIntCrLf, readLongCrLf
 ;; - `jedis.RedisOutputStream`: writeCrLf, writeIntCrLf

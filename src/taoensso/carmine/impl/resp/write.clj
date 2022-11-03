@@ -25,13 +25,13 @@
   (def ^:private ^:const uncached-num     (inc max-num-to-cache)))
 
 ;; Cache ba representation of common number bulks, etc.
-(let [num->bytes (fn [n] (.getBytes (Long/toString n) StandardCharsets/UTF_8))
+(let [long->bytes (fn [n] (.getBytes (Long/toString n) StandardCharsets/UTF_8))
       create-cache ; {<n> ((fn [n])->ba)}
-      (fn [from-n to-n f]
+      (fn [n-cast from-n to-n f]
         (java.util.concurrent.ConcurrentHashMap. ^java.util.Map
           (persistent!
             (enc/reduce-n
-              (fn [m n] (let [n (long n)] (assoc! m n (f n))))
+              (fn [m n] (let [n (n-cast n)] (assoc! m n (f n))))
               (transient {}) from-n to-n))))
 
       b* (byte \*)
@@ -40,9 +40,9 @@
 
   (let [;; {<n> *<n><CRLF>} for common lengths
         ^java.util.concurrent.ConcurrentHashMap cache
-        (create-cache 0 256
+        (create-cache long 0 256
           (fn [n]
-            (let [n-as-ba (num->bytes n)]
+            (let [n-as-ba (long->bytes n)]
               (com/xs->ba \* n-as-ba "\r\n"))))]
 
     (defn- write-array-len
@@ -51,16 +51,16 @@
         (if-let [^bytes cached-ba (.get cache n)]
           (.write out cached-ba 0 (alength cached-ba))
 
-          (let [^bytes n-as-ba (num->bytes n)]
+          (let [^bytes n-as-ba (long->bytes n)]
             (.write out b*)
             (.write out n-as-ba 0 (alength n-as-ba))
             (.write out ba-crlf 0 2))))))
 
   (let [;; {<n> $<n><CRLF>} for common lengths
         ^java.util.concurrent.ConcurrentHashMap cache
-        (create-cache 0 256
+        (create-cache long 0 256
           (fn [n]
-            (let [n-as-ba (num->bytes n)]
+            (let [n-as-ba (long->bytes n)]
               (com/xs->ba \$ n-as-ba "\r\n"))))]
 
     (defn- write-bulk-len
@@ -69,32 +69,55 @@
         (if-let [^bytes cached-ba (.get cache n)]
           (.write out cached-ba 0 (alength cached-ba))
 
-          (let [^bytes n-as-ba (num->bytes n)]
+          (let [^bytes n-as-ba (long->bytes n)]
             (.write out b$)
             (.write out n-as-ba 0 (alength n-as-ba))
             (.write out ba-crlf 0 2))))))
 
-  (let [;; {<n> $<len><CRLF><n><CRLF} for common nums
+  (let [b-colon (byte \:)
+        ;; {<n> :<n><CRLF>} for common longs
         ^java.util.concurrent.ConcurrentHashMap cache
-        (create-cache min-num-to-cache (inc max-num-to-cache)
-          (fn [n]
-            (let [^bytes       n-as-ba (num->bytes n)
-                  len (alength n-as-ba)
+        (create-cache long min-num-to-cache (inc max-num-to-cache)
+          (fn [n] (com/xs->ba \: (long->bytes n) "\r\n")))]
 
-                  ^bytes len-as-ba (num->bytes len)]
-
-              (com/xs->ba \$ len-as-ba "\r\n" n-as-ba "\r\n"))))]
-
-    (defn- write-bulk-num
+    (defn- write-simple-long
       [^BufferedOutputStream out n]
       (let [n (long n)]
         (if-let [^bytes cached-ba (.get cache n)]
           (.write out cached-ba 0 (alength cached-ba))
 
-          (let [^bytes       n-as-ba (num->bytes n)
+          (let [^bytes       n-as-ba (long->bytes n)
                 len (alength n-as-ba)
 
-                ^bytes len-as-ba (num->bytes len)]
+                ^bytes len-as-ba (long->bytes len)]
+
+            (.write out b-colon)
+            (.write out n-as-ba 0 len)
+            (.write out ba-crlf 0 2))))))
+
+  (let [double->bytes (fn [n] (.getBytes (Double/toString n) StandardCharsets/UTF_8))
+
+        ;; {<n> $<len><CRLF><n><CRLF} for common whole doubles
+        ^java.util.concurrent.ConcurrentHashMap cache
+        (create-cache double min-num-to-cache (inc max-num-to-cache)
+          (fn [n]
+            (let [^bytes       n-as-ba (double->bytes n)
+                  len (alength n-as-ba)
+
+                  ^bytes len-as-ba (long->bytes len)]
+
+              (com/xs->ba \$ len-as-ba "\r\n" n-as-ba "\r\n"))))]
+
+    (defn- write-bulk-double
+      [^BufferedOutputStream out n]
+      (let [n (double n)]
+        (if-let [^bytes cached-ba (.get cache n)]
+          (.write out cached-ba 0 (alength cached-ba))
+
+          (let [^bytes       n-as-ba (double->bytes n)
+                len (alength n-as-ba)
+
+                ^bytes len-as-ba (long->bytes len)]
 
             (.write out b$)
             (.write out len-as-ba 0 (alength len-as-ba))
@@ -110,8 +133,11 @@
    (is (= (with-out->str (write-bulk-len out           12))    "$12\r\n"))
    (is (= (with-out->str (write-bulk-len out uncached-num)) "$32768\r\n"))
 
-   (is (= (with-out->str (write-bulk-num out           12))    "$2\r\n12\r\n"))
-   (is (= (with-out->str (write-bulk-num out uncached-num)) "$5\r\n32768\r\n"))])
+   (is (= (with-out->str (write-simple-long out           12))    ":12\r\n"))
+   (is (= (with-out->str (write-simple-long out uncached-num)) ":32768\r\n"))
+
+   (is (= (with-out->str (write-bulk-double out           12))    "$4\r\n12.0\r\n"))
+   (is (= (with-out->str (write-bulk-double out uncached-num)) "$7\r\n32768.0\r\n"))])
 
 (let [write-bulk-len write-bulk-len
       ba-crlf        com/ba-crlf]
@@ -160,11 +186,11 @@
 
    (testing "Bulk num/str equivalence"
      [(is (=
-            (with-out->str (write-bulk-num out  12))
-            (with-out->str (write-bulk-str out "12"))))
+            (with-out->str (write-bulk-double out  12.5))
+            (with-out->str (write-bulk-str    out "12.5"))))
       (is (=
-            (with-out->str (write-bulk-num out      uncached-num))
-            (with-out->str (write-bulk-str out (str uncached-num)))))])])
+            (with-out->str (write-bulk-double out      (double uncached-num)))
+            (with-out->str (write-bulk-str    out (str (double uncached-num))))))])])
 
 ;;;; Wrapper types
 ;; IRedisArg behaviour influenced by wrapping arguments, wrapping
@@ -270,13 +296,13 @@
     Character            (write-bulk-arg [c  out] (write-bulk-str out (.toString c)))
     clojure.lang.Keyword (write-bulk-arg [kw out] (write-bulk-str out (kw->str   kw)))
 
-    Long    (write-bulk-arg [n out] (write-bulk-num out       n))
-    Integer (write-bulk-arg [n out] (write-bulk-num out       n))
-    Short   (write-bulk-arg [n out] (write-bulk-num out       n))
-    Byte    (write-bulk-arg [n out] (write-bulk-num out       n))
-    Double  (write-bulk-arg [n out] (write-bulk-num out       n))
-    Float   (write-bulk-arg [n out] (write-bulk-num out       n))
-    ToBytes (write-bulk-arg [x out] (write-bulk-ba  out (.-ba x)))
+    Long    (write-bulk-arg [n out] (write-simple-long out       n))
+    Integer (write-bulk-arg [n out] (write-simple-long out       n))
+    Short   (write-bulk-arg [n out] (write-simple-long out       n))
+    Byte    (write-bulk-arg [n out] (write-simple-long out       n))
+    Double  (write-bulk-arg [n out] (write-bulk-double out       n))
+    Float   (write-bulk-arg [n out] (write-bulk-double out       n))
+    ToBytes (write-bulk-arg [x out] (write-bulk-ba     out (.-ba x)))
     ToFrozen
     (write-bulk-arg [x out]
       (let [ba (or (.-?frozen-ba x) (nippy/freeze x (.-freeze-opts x)))]
@@ -335,8 +361,8 @@
 
         "Multiple reqs, with multiple args each")
 
-      (is (= (with-out->str (write-requests out [["str" 1 2 3 :kw \x]]))
-            "*6\r\n$3\r\nstr\r\n$1\r\n1\r\n$1\r\n2\r\n$1\r\n3\r\n$2\r\nkw\r\n$1\r\nx\r\n"))])
+      (is (= (with-out->str (write-requests out [["str" 1 2 3 4.0 :kw \x]]))
+            "*7\r\n$3\r\nstr\r\n:1\r\n:2\r\n:3\r\n$3\r\n4.0\r\n$2\r\nkw\r\n$1\r\nx\r\n"))])
 
    (testing "Blob markers"
      [(is (= (with-out->str (write-requests out [[nil]])) "*1\r\n$2\r\n\u0000_\r\n")            "ba-nil marker")
