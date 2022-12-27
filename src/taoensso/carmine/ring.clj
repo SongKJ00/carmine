@@ -8,11 +8,12 @@
 (defrecord CarmineSessionStore [conn-opts prefix ttl-secs extend-on-read?]
   ring.middleware.session.store/SessionStore
   (read-session [_ k]
-    (last
-      (wcar conn-opts :as-pipeline
-        (when (and extend-on-read? ttl-secs)
-          (car/expire k ttl-secs))
-        (car/get k))))
+                (prn "k: " k)
+                (last
+                 (wcar conn-opts :as-pipeline
+                       (when (and extend-on-read? ttl-secs)
+                         (car/expire k ttl-secs))
+                       (car/get k))))
 
   (delete-session [_ k] (wcar conn-opts (car/del k)) nil)
   (write-session  [_ k data]
